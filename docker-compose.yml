@@ -1,0 +1,9 @@
+services:
+  bot:
+    build: .
+    container_name: telegram-bot
+    env_file:
+      - .env
+    environment:
+      - MODE=polling
+    restart: unless-stopped
