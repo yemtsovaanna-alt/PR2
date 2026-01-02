@@ -3,12 +3,14 @@ import logging
 import os
 import requests
 from typing import Any, Awaitable, Callable, Optional
+from aiohttp import web
 from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
 from aiogram.filters import Command
-from aiogram.types import Message, TelegramObject
+from aiogram.types import Message, TelegramObject, Update
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # Настройка логирования
 logging.basicConfig(
@@ -31,9 +33,19 @@ class LoggingMiddleware(BaseMiddleware):
             logger.info(f"User {user.id} (@{user.username}): {event.text}")
         return await handler(event, data)
 
-# Токены (замените на свои)
+
+# Токены из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "YOUR_WEATHER_API_KEY")
+
+# URL вашего сервиса на render.com (установите в переменных окружения)
+# Например: https://your-bot-name.onrender.com
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "")
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+
+# Порт для веб-сервера (render.com предоставляет через переменную PORT)
+PORT = int(os.getenv("PORT", 8000))
 
 # Хранилище данных пользователей
 users = {}
@@ -437,8 +449,25 @@ async def cmd_check_progress(message: Message):
     )
 
 
-async def main():
-    """Запуск бота"""
+async def on_startup(bot: Bot):
+    """Действия при запуске бота - установка webhook"""
+    await bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook установлен: {WEBHOOK_URL}")
+
+
+async def on_shutdown(bot: Bot):
+    """Действия при остановке бота - удаление webhook"""
+    await bot.delete_webhook()
+    logger.info("Webhook удалён")
+
+
+async def health_check(request):
+    """Эндпоинт для проверки здоровья сервиса"""
+    return web.Response(text="OK")
+
+
+def main():
+    """Запуск бота с webhook"""
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
@@ -447,9 +476,30 @@ async def main():
 
     dp.include_router(router)
 
-    logger.info("Бот запущен")
-    await dp.start_polling(bot)
+    # Регистрируем startup и shutdown хуки
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
+    # Создаём aiohttp приложение
+    app = web.Application()
+
+    # Добавляем health check эндпоинт
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+
+    # Настраиваем webhook handler
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
+    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+
+    # Настраиваем приложение
+    setup_application(app, dp, bot=bot)
+
+    logger.info(f"Запуск веб-сервера на порту {PORT}")
+    web.run_app(app, host="0.0.0.0", port=PORT)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
